@@ -1,0 +1,6 @@
+streamlit>=1.38
+openai>=1.40
+python-dotenv>=1.0
+requests>=2.31
+serpapi>=0.1.5
+sendgrid>=6.11
