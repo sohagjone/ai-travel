@@ -69,3 +69,82 @@ def hotel_highlights(hotels: List[Dict[str, Any]]) -> Dict[str, Optional[Dict[st
         "top_rated": max(rated, key=lambda h: (h["rating"], h.get("reviews") or 0), default=None),
         "lowest_price": min(priced, key=lambda h: h["price_per_night"], default=None),
     }
+
+
+# ------------------------------------------------------------------ filters
+# A filter that is left at its "everything" setting is skipped, so rows with a
+# missing value (no price, no rating...) are not hidden unless you really filter.
+def _hour(value: Optional[str]) -> Optional[int]:
+    dt = _parse(value)
+    return dt.hour if dt else None
+
+
+def filter_flights(
+    rows: List[Dict[str, Any]],
+    price_range: Optional[tuple] = None,
+    price_bounds: Optional[tuple] = None,
+    airlines: Optional[List[str]] = None,
+    max_stops: Optional[int] = None,
+    max_hours: Optional[float] = None,
+    max_hours_bound: Optional[float] = None,
+    depart_hours: Optional[tuple] = None,
+) -> List[Dict[str, Any]]:
+    out = []
+    for f in rows:
+        if price_range and price_range != price_bounds:
+            if f.get("price") is None or not price_range[0] <= f["price"] <= price_range[1]:
+                continue
+        if airlines:
+            if not set(f.get("airlines_list") or []) & set(airlines):
+                continue
+        if max_stops is not None and (f.get("stops") is None or f["stops"] > max_stops):
+            continue
+        if max_hours is not None and max_hours != max_hours_bound:
+            if not f.get("duration_minutes") or f["duration_minutes"] > max_hours * 60:
+                continue
+        if depart_hours and depart_hours != (0, 23):
+            h = _hour(f.get("departure"))
+            if h is None or not depart_hours[0] <= h <= depart_hours[1]:
+                continue
+        out.append(f)
+    return out
+
+
+def filter_hotels(
+    rows: List[Dict[str, Any]],
+    price_range: Optional[tuple] = None,
+    price_bounds: Optional[tuple] = None,
+    min_rating: float = 0.0,
+    classes: Optional[List[str]] = None,
+    amenities: Optional[List[str]] = None,
+    name_query: str = "",
+) -> List[Dict[str, Any]]:
+    out = []
+    query = (name_query or "").strip().lower()
+    for h in rows:
+        if price_range and price_range != price_bounds:
+            p = h.get("price_per_night")
+            if p is None or not price_range[0] <= p <= price_range[1]:
+                continue
+        if min_rating and (h.get("rating") is None or h["rating"] < min_rating):
+            continue
+        if classes and h.get("hotel_class") not in classes:
+            continue
+        if amenities and not set(amenities) <= set(h.get("amenities_list") or []):
+            continue
+        if query and query not in (h.get("name") or "").lower():
+            continue
+        out.append(h)
+    return out
+
+
+def airline_options(rows: List[Dict[str, Any]]) -> List[str]:
+    return sorted({a for f in rows for a in (f.get("airlines_list") or [])})
+
+
+def amenity_options(rows: List[Dict[str, Any]], limit: int = 25) -> List[str]:
+    counts: Dict[str, int] = {}
+    for h in rows:
+        for a in h.get("amenities_list") or []:
+            counts[a] = counts.get(a, 0) + 1
+    return [a for a, _ in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:limit]]

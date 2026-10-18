@@ -124,6 +124,7 @@ def _flight_rows(flights_result: Optional[Dict[str, Any]], currency: str) -> Lis
             {
                 "option": i,
                 "airline": f.get("airline"),
+                "airlines_list": f.get("airlines") or ([f["airline"]] if f.get("airline") else []),
                 "flight_number": f.get("flight_number"),
                 "departure_airport": f.get("departure_airport"),
                 "departure": f.get("departure"),

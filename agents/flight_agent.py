@@ -102,6 +102,7 @@ class FlightAgent(BaseAgent):
                 rows.append(
                     {
                         "airline": _join_unique([leg.get("airline") for leg in legs]),
+                        "airlines": [str(a) for a in dict.fromkeys(leg.get("airline") for leg in legs) if a],
                         "flight_number": _join_unique([leg.get("flight_number") for leg in legs]),
                         "departure": (first.get("departure_airport") or {}).get("time"),
                         "arrival": (last.get("arrival_airport") or {}).get("time"),

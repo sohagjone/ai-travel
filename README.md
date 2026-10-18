@@ -1,6 +1,6 @@
 # AI Travel Analysis
 
-Streamlit app: search flights + hotels (SerpAPI), compare them, and **download the results** as PDF, Excel, Word, CSV (flights / hotels) and JSON.
+Streamlit app: search flights + hotels (SerpAPI), filter/compare them, see origin/destination airport photos (from Wikipedia, with a placeholder when none is found), and **download the results** as PDF, Excel, Word, CSV (flights / hotels) and JSON.
 
 ## Run locally
 ```bash

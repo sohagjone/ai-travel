@@ -1,5 +1,7 @@
 import asyncio
+import math
 import json
+from html import escape
 import re
 import uuid
 from datetime import date, timedelta
@@ -12,10 +14,12 @@ from dotenv import load_dotenv
 from agents.email_agent import EmailAgent
 from agents.orchestrator_agent import OrchestratorAgent
 from utils.config import get_secret, redact
+from utils.airport_photos import find_airport_photo
 from utils.display import (
-    FLIGHT_SORTS, HOTEL_SORTS, day_offset, fmt_date, fmt_time, flight_highlights,
-    hotel_highlights, md_link, stops_text,
+    FLIGHT_SORTS, HOTEL_SORTS, airline_options, amenity_options, day_offset, filter_flights,
+    filter_hotels, flight_highlights, fmt_date, fmt_time, hotel_highlights, md_link, stops_text,
 )
+from utils.styles import CSS, HERO
 from utils.export_reports import build_all_exports
 from utils.report_data import (
     FLIGHT_COLUMNS,
@@ -26,6 +30,7 @@ from utils.report_data import (
 )
 from utils.validation import (
     airport_choices,
+    airport_info,
     city_for_airport,
     code_from_label,
     is_valid_email,
@@ -62,10 +67,20 @@ def _download_button(label: str, data: bytes, file_name: str, mime: str, key: st
         st.download_button(label, data=data, file_name=file_name, mime=mime, key=key, use_container_width=True)
 
 
+@st.cache_data(ttl=7 * 24 * 3600, show_spinner=False)
+def cached_airport_photo(code: str):
+    """Photo lookups are cached for a week so they never slow down reruns."""
+    return find_airport_photo(code)
+
+
+FILTER_PREFIXES = ("flt_", "hflt_", "sort_", "show_all_")
+
+
 def reset_search() -> None:
     """Callback for the 'New search' button: forget results and restore form defaults."""
     st.session_state.pop("search", None)
-    for key in FORM_KEYS + [k for k in list(st.session_state) if k.startswith("child_age_")]:
+    extra = [k for k in list(st.session_state) if k.startswith(("child_age_",) + FILTER_PREFIXES)]
+    for key in FORM_KEYS + extra:
         st.session_state.pop(key, None)
 
 
@@ -79,45 +94,36 @@ def _form_signature(values: Dict[str, Any]) -> tuple:
 def render_form() -> Optional[Dict[str, Any]]:
     """Draw the search form. Returns the form values (and a `submit` flag)."""
     today = date.today()
-    st.subheader("Plan your trip")
-    c1, c2 = st.columns(2)
     labels, _ = airport_choices()
-    origin_label = c1.selectbox(
-        "Origin airport", options=labels, index=None, key="origin",
-        placeholder="Type a code or airport name, e.g. DAC", help="Start typing to search all airports.",
-    )
-    destination_label = c2.selectbox(
-        "Destination airport", options=labels, index=None, key="destination",
-        placeholder="Type a code or airport name, e.g. AMS", help="Start typing to search all airports.",
-    )
-    d1, d2 = st.columns(2)
-    departure_date = d1.date_input("Departure date", value=today + timedelta(days=30), min_value=today, key="dep_date")
-    return_date = d2.date_input("Return date", value=today + timedelta(days=37), min_value=today, key="ret_date")
-    t1, t2, t3 = st.columns(3)
-    adults = int(t1.number_input("Adults", min_value=1, max_value=9, value=1, step=1, key="adults"))
-    children = int(t2.number_input("Children", min_value=0, max_value=8, value=0, step=1, key="children"))
-    rooms = int(t3.number_input("Rooms", min_value=1, max_value=8, value=1, step=1, key="rooms"))
-
-    children_ages = []
-    if children:
-        st.caption("Children's ages are needed for hotel prices.")
-        age_cols = st.columns(min(children, 4))
-        for i in range(children):
-            with age_cols[i % len(age_cols)]:
-                children_ages.append(int(st.number_input(f"Child {i + 1} age", min_value=0, max_value=17, value=8, step=1, key=f"child_age_{i}")))
-
-    with st.expander("More options"):
-        stops = st.selectbox(
-            "Flight stops",
-            options=list(STOPS_LABELS.keys()),
-            index=1,
-            format_func=lambda k: STOPS_LABELS[k],
-            key="stops",
-            help="The original app searched nonstop flights only, so that is still the default.",
+    with st.container(border=True, key="card_form"):
+        st.markdown("#### Plan your trip")
+        c1, c2 = st.columns(2)
+        origin_label = c1.selectbox(
+            "From", options=labels, index=None, key="origin",
+            placeholder="Type a code or airport name, e.g. DAC", help="Start typing to search all airports.",
         )
-        hotel_city = st.text_input("Hotel city (optional)", key="hotel_city", help="Leave empty to use the destination airport's city.")
+        destination_label = c2.selectbox(
+            "To", options=labels, index=None, key="destination",
+            placeholder="Type a code or airport name, e.g. AMS", help="Start typing to search all airports.",
+        )
+        d1, d2, t1, t2, t3 = st.columns([1.3, 1.3, 1, 1, 1])
+        departure_date = d1.date_input("Departure", value=today + timedelta(days=30), min_value=today, key="dep_date")
+        return_date = d2.date_input("Return", value=today + timedelta(days=37), min_value=today, key="ret_date")
+        adults = int(t1.number_input("Adults", min_value=1, max_value=9, value=1, step=1, key="adults"))
+        children = int(t2.number_input("Children", min_value=0, max_value=8, value=0, step=1, key="children"))
+        rooms = int(t3.number_input("Rooms", min_value=1, max_value=8, value=1, step=1, key="rooms"))
 
-    submitted = st.button("Search flights and hotels", type="primary")
+        children_ages = []
+        if children:
+            st.caption("Children's ages are needed for hotel prices.")
+            age_cols = st.columns(min(children, 4))
+            for i in range(children):
+                with age_cols[i % len(age_cols)]:
+                    children_ages.append(int(st.number_input(f"Child {i + 1} age", min_value=0, max_value=17, value=8, step=1, key=f"child_age_{i}")))
+
+        b1, b2, _ = st.columns([2, 1, 5])
+        submitted = b1.button("Search flights and hotels", type="primary")
+        b2.button("New search", on_click=reset_search, help="Clear the results and reset the form")
     return {
         "submit": submitted,
         "origin": code_from_label(origin_label),
@@ -128,8 +134,10 @@ def render_form() -> Optional[Dict[str, Any]]:
         "children": children,
         "children_ages": children_ages,
         "rooms": rooms,
-        "stops": stops,
-        "hotel_city": (hotel_city or "").strip(),
+        # Stops are no longer a form option: we search every itinerary and the
+        # "Stops" filter below the results narrows them. Hotel city comes from the airport.
+        "stops": 0,
+        "hotel_city": "",
     }
 
 
@@ -188,11 +196,14 @@ def run_search(form: Dict[str, Any]) -> None:
 def render_summary(report: Dict[str, Any], form_changed: bool) -> None:
     req = report["request"]
     travellers = f"{req['adults']} adult(s)" + (f", {req['children']} child(ren)" if req["children"] else "")
-    st.subheader(f"{req['origin']} → {req['destination']}")
-    st.caption(
-        f"{req['departure_date']} to {req['return_date']} ({req['nights']} nights) · {travellers} · "
-        f"{req['rooms']} room(s) · {req['flight_stops_filter']} · prices in {req['currency']}"
-    )
+    origin = f"{req.get('origin_city') or req['origin']} ({req['origin']})"
+    dest = f"{req.get('destination_city') or req['destination']} ({req['destination']})"
+    st.markdown(f'<div class="route-title">{escape(origin)} → {escape(dest)}</div>', unsafe_allow_html=True)
+    pills = [
+        f"📅 {req['departure_date']} → {req['return_date']} ({req['nights']} nights)",
+        f"👥 {travellers}", f"🛏 {req['rooms']} room(s)", f"💵 Prices in {req['currency']}",
+    ]
+    st.markdown("".join(f'<span class="pill">{escape(p)}</span>' for p in pills), unsafe_allow_html=True)
     st.caption(f"Generated {report['generated_at_display']}")
     if form_changed:
         st.info("The form has changed since these results were generated. Click **Search** to refresh them.")
@@ -238,22 +249,84 @@ def _show_limit(total: int, key: str, step: int = 10) -> int:
     return total if st.toggle(f"Show all {total} options (showing {step})", key=key) else step
 
 
+def reset_filters() -> None:
+    for key in [k for k in list(st.session_state) if k.startswith(("flt_", "hflt_"))]:
+        st.session_state.pop(key, None)
+
+
+def _range_slider(container, label: str, values, key: str, step: int = 1):
+    """Min-max slider over the data. Returns (selected, bounds) or (None, None) if there is no range."""
+    nums = [v for v in values if v is not None]
+    if not nums:
+        return None, None
+    lo, hi = int(math.floor(min(nums))), int(math.ceil(max(nums)))
+    if lo >= hi:
+        return None, None
+    return container.slider(label, lo, hi, (lo, hi), step=step, key=key), (lo, hi)
+
+
+def _airport_tile(code: str, title: str) -> None:
+    """Photo (from Wikipedia) of the airport chosen in the dropdown, or a clean placeholder."""
+    info = airport_info(code) or {}
+    st.caption(title)
+    photo = cached_airport_photo(code)
+    if photo:
+        st.image(photo["url"], use_container_width=True)
+        st.caption(f"Photo: [Wikipedia]({photo['page']})")
+    else:
+        st.markdown(
+            f'<div class="photo-ph">{escape(code)}<small>photo not available</small></div>', unsafe_allow_html=True
+        )
+    st.markdown(f"**{_md_safe(code)}** · {_md_safe(info.get('city') or '')}")
+
+
 def render_flights(report: Dict[str, Any]) -> None:
     flights = report["flights"]
     if not flights:
-        st.info("No flight options were returned for this search. Try different dates, or allow more stops under *More options*.")
+        st.info("No flight options were returned for this search. Try different dates or airports.")
         return
-    currency = report["request"]["currency"]
+    req = report["request"]
+    currency = req["currency"]
+    sid = st.session_state["search"]["id"]
     hi = flight_highlights(flights)
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Flights found", len(flights))
     cheapest, fastest = hi["cheapest"], hi["fastest"]
+
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("Flights found", len(flights))
     m2.metric("Cheapest", fmt_money(cheapest["price"], currency) if cheapest else "n/a", cheapest["airline"] if cheapest else None, delta_color="off")
     m3.metric("Fastest", fastest["duration"] if fastest else "n/a", fastest["airline"] if fastest else None, delta_color="off")
+    with m4:
+        _airport_tile(req["origin"], "Origin airport")
+    with m5:
+        _airport_tile(req["destination"], "Destination airport")
 
-    rows = _sorted(flights, FLIGHT_SORTS, "Sort flights by", "sort_flights")
-    for f in rows[: _show_limit(len(rows), "show_all_flights")]:
-        with st.container(border=True):
+    # ----- filters
+    with st.expander("🔎 Filter flights", expanded=True):
+        f1, f2, f3 = st.columns(3)
+        price_range, price_bounds = _range_slider(f1, f"Price ({currency})", [f["price"] for f in flights], f"flt_price_{sid}")
+        airlines = f2.multiselect("Airlines", airline_options(flights), key=f"flt_airlines_{sid}", placeholder="All airlines")
+        stop_labels = {"Any number of stops": None, "Nonstop only": 0, "Up to 1 stop": 1, "Up to 2 stops": 2}
+        stop_choice = f3.selectbox("Stops", list(stop_labels), key=f"flt_stops_{sid}")
+        g1, g2, g3 = st.columns(3)
+        hours = [f["duration_minutes"] / 60 for f in flights if f.get("duration_minutes")]
+        max_hours, hours_bound = None, None
+        if hours and math.ceil(max(hours)) > math.floor(min(hours)):
+            hours_bound = math.ceil(max(hours))
+            max_hours = g1.slider("Max duration (hours)", int(math.floor(min(hours))), hours_bound, hours_bound, key=f"flt_dur_{sid}")
+        depart = g2.slider("Departure time", 0, 23, (0, 23), key=f"flt_dep_{sid}", format="%02d:00")
+        g3.write("")
+        g3.button("Reset filters", on_click=reset_filters, key=f"flt_reset_{sid}")
+
+    shown = filter_flights(
+        flights, price_range, price_bounds, airlines, stop_labels[stop_choice], max_hours, hours_bound, depart,
+    )
+    rows = _sorted(shown, FLIGHT_SORTS, "Sort flights by", "sort_flights")
+    st.caption(f"Showing {len(shown)} of {len(flights)} flights. Downloads always contain all results.")
+    if not shown:
+        st.info("No flights match these filters. Try widening them or click **Reset filters**.")
+
+    for i, f in enumerate(rows[: _show_limit(len(rows), "show_all_flights")]):
+        with st.container(border=True, key=f"card_flight_{i}"):
             c_logo, c_main, c_route, c_price = st.columns([1, 3, 5, 3], vertical_alignment="center")
             with c_logo:
                 if f.get("logo_url"):
@@ -287,14 +360,14 @@ def render_flights(report: Dict[str, Any]) -> None:
     with st.expander("Table view (sortable, for comparing)"):
         df = pd.DataFrame(
             {
-                "Airline": [f["airline"] for f in flights],
-                "Flight": [f["flight_number"] for f in flights],
-                "Departure": [f["departure"] for f in flights],
-                "Arrival": [f["arrival"] for f in flights],
-                "Duration": [f["duration"] for f in flights],
-                "Stops": [f["stops"] for f in flights],
-                f"Price ({currency})": [f["price"] for f in flights],
-                "Link": [f["booking_url"] for f in flights],
+                "Airline": [f["airline"] for f in shown],
+                "Flight": [f["flight_number"] for f in shown],
+                "Departure": [f["departure"] for f in shown],
+                "Arrival": [f["arrival"] for f in shown],
+                "Duration": [f["duration"] for f in shown],
+                "Stops": [f["stops"] for f in shown],
+                f"Price ({currency})": [f["price"] for f in shown],
+                "Link": [f["booking_url"] for f in shown],
             }
         )
         fmt = f"{currency_symbol(currency)}%,.0f" if currency_symbol(currency) else "%,.0f"
@@ -313,6 +386,7 @@ def render_hotels(report: Dict[str, Any]) -> None:
         st.info("No hotel options were returned for this search.")
         return
     currency = report["request"]["currency"]
+    sid = st.session_state["search"]["id"]
     hi = hotel_highlights(hotels)
     top, low = hi["top_rated"], hi["lowest_price"]
     m1, m2, m3 = st.columns(3)
@@ -320,9 +394,29 @@ def render_hotels(report: Dict[str, Any]) -> None:
     m2.metric("Top rated", f"{top['rating']:.1f} ★" if top else "n/a", top["name"] if top else None, delta_color="off")
     m3.metric("Lowest per night", fmt_money(low["price_per_night"], currency) if low else "n/a", low["name"] if low else None, delta_color="off")
 
-    rows = _sorted(hotels, HOTEL_SORTS, "Sort hotels by", "sort_hotels")
-    for h in rows[: _show_limit(len(rows), "show_all_hotels")]:
-        with st.container(border=True):
+    with st.expander("🔎 Filter hotels", expanded=True):
+        h1, h2, h3 = st.columns(3)
+        price_range, price_bounds = _range_slider(h1, f"Price per night ({currency})", [h["price_per_night"] for h in hotels], f"hflt_price_{sid}")
+        min_rating = h2.select_slider(
+            "Minimum guest rating", options=[0.0, 3.0, 3.5, 4.0, 4.5], value=0.0,
+            format_func=lambda v: "Any" if v == 0 else f"{v:.1f}+ ★", key=f"hflt_rating_{sid}",
+        )
+        classes = sorted({h["hotel_class"] for h in hotels if h.get("hotel_class")})
+        picked_classes = h3.multiselect("Hotel class", classes, key=f"hflt_class_{sid}", placeholder="Any class")
+        k1, k2, k3 = st.columns(3)
+        amenities = k1.multiselect("Must have amenities", amenity_options(hotels), key=f"hflt_amen_{sid}", placeholder="Any")
+        name_query = k2.text_input("Hotel name contains", key=f"hflt_name_{sid}", placeholder="e.g. Hilton")
+        k3.write("")
+        k3.button("Reset filters", on_click=reset_filters, key=f"hflt_reset_{sid}")
+
+    shown = filter_hotels(hotels, price_range, price_bounds, min_rating, picked_classes, amenities, name_query)
+    rows = _sorted(shown, HOTEL_SORTS, "Sort hotels by", "sort_hotels")
+    st.caption(f"Showing {len(shown)} of {len(hotels)} hotels. Downloads always contain all results.")
+    if not shown:
+        st.info("No hotels match these filters. Try widening them or click **Reset filters**.")
+
+    for i, h in enumerate(rows[: _show_limit(len(rows), "show_all_hotels")]):
+        with st.container(border=True, key=f"card_hotel_{i}"):
             c_img, c_info, c_price = st.columns([2, 6, 3], vertical_alignment="center")
             with c_img:
                 if h.get("image_url"):
@@ -343,11 +437,9 @@ def render_hotels(report: Dict[str, Any]) -> None:
                     ("green", "Top rated" if h is top else ""),
                     ("blue", "Lowest price" if h is low else ""),
                 ))
-                amenities = h.get("amenities_list") or []
-                if amenities:
-                    shown = ", ".join(_md_safe(a) for a in amenities[:5])
-                    more = f" +{len(amenities) - 5} more" if len(amenities) > 5 else ""
-                    st.caption(shown + more)
+                am = h.get("amenities_list") or []
+                if am:
+                    st.caption(", ".join(_md_safe(a) for a in am[:5]) + (f" +{len(am) - 5} more" if len(am) > 5 else ""))
             with c_price:
                 st.markdown(f"### {_md_safe(fmt_money(h.get('price_per_night'), currency))}")
                 st.caption("per night" if h.get("price_per_night") is not None else "price not available")
@@ -361,13 +453,13 @@ def render_hotels(report: Dict[str, Any]) -> None:
         fmt = f"{currency_symbol(currency)}%,.0f" if currency_symbol(currency) else "%,.0f"
         df = pd.DataFrame(
             {
-                "Hotel": [h["name"] for h in hotels],
-                "Rating": [h["rating"] for h in hotels],
-                "Reviews": [h["reviews"] for h in hotels],
-                f"Per night ({currency})": [h["price_per_night"] for h in hotels],
-                f"Total ({currency})": [h["total_price"] for h in hotels],
-                "Amenities": [h["amenities"] or None for h in hotels],
-                "Link": [h["booking_url"] for h in hotels],
+                "Hotel": [h["name"] for h in shown],
+                "Rating": [h["rating"] for h in shown],
+                "Reviews": [h["reviews"] for h in shown],
+                f"Per night ({currency})": [h["price_per_night"] for h in shown],
+                f"Total ({currency})": [h["total_price"] for h in shown],
+                "Amenities": [h["amenities"] or None for h in shown],
+                "Link": [h["booking_url"] for h in shown],
             }
         )
         st.dataframe(
@@ -454,13 +546,12 @@ def render_email(search: Dict[str, Any]) -> None:
 
 def main():
     st.set_page_config(page_title="AI Travel Analysis", page_icon="✈️", layout="wide")
-    st.title("✈️ AI Travel Analysis")
-    st.write("Search flights and hotels, compare them, and download the results as PDF, Excel, CSV, JSON or Word.")
+    st.markdown(CSS, unsafe_allow_html=True)
+    st.markdown(HERO, unsafe_allow_html=True)
     if not get_secret("SERPAPI_API_KEY"):
         st.warning("SERPAPI_API_KEY is not configured, so searches will fail until it is added (see README).")
 
     form = render_form()
-    st.button("New search", on_click=reset_search, help="Clear the results and reset the form")
     if form["submit"]:
         run_search(form)
 
@@ -472,7 +563,7 @@ def main():
     st.divider()
     render_summary(report, form_changed=current_signature != search["signature"])
     render_exports(search)
-    tab_flights, tab_hotels, tab_recs = st.tabs(["Flights", "Hotels", "AI Recommendations"])
+    tab_flights, tab_hotels, tab_recs = st.tabs(["✈️ Flights", "🏨 Hotels", "🤖 AI Recommendations"])
     with tab_flights:
         render_flights(report)
     with tab_hotels:
