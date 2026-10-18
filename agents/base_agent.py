@@ -1,186 +1,194 @@
-import ast
+from typing import Dict, Any, Optional
 import json
-import os
-import time
-from typing import Any, Dict, List, Optional
+from datetime import datetime
 
-from openai import NotFoundError, OpenAI, RateLimitError
+from utils.config import get_secret, logger, redact
 
-# Free providers that speak the OpenAI API. The app tries them in this order and
-# uses every one that has a key in Streamlit Secrets (or in a local .env file).
-# If one fails or hits its limit, it automatically moves on to the next.
-PROVIDERS = [
-    {
-        "name": "gemini",
-        "secrets": ("GEMINI_API_KEY", "GOOGLE_API_KEY"),  # either name works
-        "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
-        "preferred": [
-            "gemini-2.5-flash-lite",
-            "gemini-2.5-flash",
-            "gemini-3-flash-preview",
-            "gemini-flash-latest",
-        ],
-        "prefer_word": "flash",
-        "avoid": (),
-        "max_tokens": 4000,
-        "max_prompt_chars": 60000,  # about 15,000 tokens
-    },
-    {
-        "name": "groq",
-        "secrets": ("GROQ_API_KEY",),
-        "base_url": "https://api.groq.com/openai/v1",
-        "preferred": [
-            "meta-llama/llama-4-scout-17b-16e-instruct",
-            "llama-3.3-70b-versatile",
-        ],
-        "prefer_word": None,
-        # gpt-oss models are limited to 8,000 tokens per minute on the free plan
-        "avoid": ("gpt-oss",),
-        "max_tokens": 1500,  # Groq counts the requested output size too
-        "max_prompt_chars": 20000,  # about 5,000 tokens
-    },
-]
+CURRENT_YEAR = datetime.now().year
 
-# Models that can't do normal text chat
-SKIP_WORDS = ("whisper", "tts", "guard", "orpheus", "playai", "embed", "image",
-              "imagen", "veo", "aqa", "live", "audio", "vision-only")
+EMAILS_SYSTEM_PROMPT = """Your task is to convert structured markdown-like text into a valid HTML email body.
 
-_model_cache: Dict[str, str] = {}  # provider name -> model id (found once)
+- Do not include a ```html preamble in your response.
+- The output should be in proper HTML format, ready to be used as the body of an email.
+Here is an example:
+<example>
+Input:
+
+I want to travel to New York from Madrid from October 1-7. Find me flights and 4-star hotels.
+
+Expected Output:
+
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Flight and Hotel Options</title>
+</head>
+<body>
+    <h2>Flights from Madrid to New York</h2>
+    <ol>
+        <li>
+            <strong>American Airlines</strong><br>
+            <strong>Departure:</strong> Adolfo Suárez Madrid–Barajas Airport (MAD) at 10:25 AM<br>
+            <strong>Arrival:</strong> John F. Kennedy International Airport (JFK) at 12:25 PM<br>
+            <strong>Duration:</strong> 8 hours<br>
+            <strong>Aircraft:</strong> Boeing 777<br>
+            <strong>Class:</strong> Economy<br>
+            <strong>Price:</strong> $702<br>
+            <img src="https://www.gstatic.com/flights/airline_logos/70px/AA.png" alt="American Airlines"><br>
+            <a href="https://www.google.com/flights">Book on Google Flights</a>
+        </li>
+        <li>
+            <strong>Iberia</strong><br>
+            <strong>Departure:</strong> Adolfo Suárez Madrid–Barajas Airport (MAD) at 12:25 PM<br>
+            <strong>Arrival:</strong> John F. Kennedy International Airport (JFK) at 2:40 PM<br>
+            <strong>Duration:</strong> 8 hours 15 minutes<br>
+            <strong>Aircraft:</strong> Airbus A330<br>
+            <strong>Class:</strong> Economy<br>
+            <strong>Price:</strong> $702<br>
+            <img src="https://www.gstatic.com/flights/airline_logos/70px/IB.png" alt="Iberia"><br>
+            <a href="https://www.google.com/flights">Book on Google Flights</a>
+        </li>
+        <li>
+            <strong>Delta Airlines</strong><br>
+            <strong>Departure:</strong> Adolfo Suárez Madrid–Barajas Airport (MAD) at 10:00 AM<br>
+            <strong>Arrival:</strong> John F. Kennedy International Airport (JFK) at 12:30 PM<br>
+            <strong>Duration:</strong> 8 hours 30 minutes<br>
+            <strong>Aircraft:</strong> Boeing 767<br>
+            <strong>Class:</strong> Economy<br>
+            <strong>Price:</strong> $738<br>
+            <img src="https://www.gstatic.com/flights/airline_logos/70px/DL.png" alt="Delta Airlines"><br>
+            <a href="https://www.google.com/flights">Book on Google Flights</a>
+        </li>
+    </ol>
+
+    <h2>4-Star Hotels in New York</h2>
+    <ol>
+        <li>
+            <strong>NobleDen Hotel</strong><br>
+            <strong>Description:</strong> Modern, polished hotel offering sleek rooms, some with city-view balconies, plus free Wi-Fi.<br>
+            <strong>Location:</strong> Near Washington Square Park, Grand St, and JFK Airport.<br>
+            <strong>Rate per Night:</strong> $537<br>
+            <strong>Total Rate:</strong> $3,223<br>
+            <strong>Rating:</strong> 4.8/5 (656 reviews)<br>
+            <strong>Amenities:</strong> Free Wi-Fi, Parking, Air conditioning, Restaurant, Accessible, Business centre, Child-friendly, Smoke-free property<br>
+            <img src="https://lh5.googleusercontent.com/p/AF1QipNDUrPJwBhc9ysDhc8LA822H1ZzapAVa-WDJ2d6=s287-w287-h192-n-k-no-v1" alt="NobleDen Hotel"><br>
+            <a href="http://www.nobleden.com/">Visit Website</a>
+        </li>
+    </ol>
+</body>
+</html>
+
+</example>
+"""
+
+TOOLS_SYSTEM_PROMPT = f"""You are a smart travel agency. Use the tools to look up information.
+    You are allowed to make multiple calls (either together or in sequence).
+    Only look up information when you are sure of what you want.
+    The current year is {CURRENT_YEAR}.
+    If you need to look up some information before asking a follow up question, you are allowed to do that!
+    I want to have in your output links to hotels websites and flights websites (if possible).
+    I want to have as well the logo of the hotel and the logo of the airline company (if possible).
+    In your output always include the price of the flight and the price of the hotel and the currency as well (if possible).
+    for example for hotels-
+    Rate: $581 per night
+    Total: $3,488
+"""
 
 
-def _get_secret(name: str) -> Optional[str]:
-    """Read a value from Streamlit Secrets, falling back to environment variables."""
-    value = None
-    try:
-        import streamlit as st
-
-        value = st.secrets.get(name)
-    except Exception:
-        pass  # no secrets file (e.g. running locally), fall back to env
-    return value or os.getenv(name)
-
-
-def _get_first_secret(names) -> Optional[str]:
-    for name in names:
-        value = _get_secret(name)
-        if value:
-            return value
-    return None
-
-
-def _trim_prompt(prompt: str, max_chars: int) -> str:
-    """Cut very long prompts so they stay under the provider's token limits."""
-    return prompt if len(prompt) <= max_chars else prompt[:max_chars]
-
-
-def _pick_model(provider: dict, client: OpenAI) -> str:
-    """Choose a model that really exists for this key (model lists change often)."""
-    name = provider["name"]
-    if name in _model_cache:
-        return _model_cache[name]
-
-    override = _get_secret(f"{name.upper()}_MODEL")  # e.g. GROQ_MODEL in Secrets
-    if override:
-        _model_cache[name] = override
-        return override
-
-    available = [m.id.replace("models/", "") for m in client.models.list().data]
-    for candidate in provider["preferred"]:
-        if candidate in available:
-            _model_cache[name] = candidate
-            return candidate
-
-    chat = [m for m in available if not any(w in m.lower() for w in SKIP_WORDS)]
-    avoid = provider.get("avoid", ())
-    chat = [m for m in chat if not any(a in m.lower() for a in avoid)] or chat
-    word = provider["prefer_word"]
-    if word:
-        preferred = [m for m in chat if word in m.lower()]
-        chat = preferred or chat
-    if not chat:
-        raise RuntimeError(f"{name}: no usable chat model found. Got: {available}")
-    _model_cache[name] = chat[0]
-    return chat[0]
+class LLMUnavailableError(Exception):
+    """The AI model is not configured or could not be reached."""
 
 
 class BaseAgent:
-    def __init__(self, name: str, instructions: str, agent_type: str = "tools"):
-        # agent_type is accepted for backward compatibility with the old code.
-        self.name = name
-        self.instructions = instructions
-        self.agent_type = agent_type
+    """Shared behaviour for all agents.
 
-        self.clients: List[tuple] = []  # (provider, client)
-        for p in PROVIDERS:
-            key = _get_first_secret(p["secrets"])
-            if key:
-                self.clients.append((p, OpenAI(base_url=p["base_url"], api_key=key)))
-        if not self.clients:
-            raise RuntimeError(
-                "No AI key found. In Streamlit Cloud go to Manage app -> Settings -> "
-                "Secrets and add GEMINI_API_KEY and/or GROQ_API_KEY. "
-                "Locally, put them in a .env file."
+    The AI model is OPTIONAL. It is configured with three settings (environment
+    variables or Streamlit secrets):
+
+        LLM_BASE_URL  OpenAI-compatible endpoint, e.g. https://api.openai.com/v1
+                      (for local development with Ollama: http://localhost:11434/v1)
+        LLM_API_KEY   key for that endpoint (Ollama accepts any text, e.g. "ollama")
+        LLM_MODEL     model name, e.g. gpt-4o-mini  (Ollama: llama3.2)
+
+    If these are not set, the app still works: flights, hotels and downloads do
+    not need an AI model. A deterministic summary is used instead.
+    """
+
+    def __init__(self, name: str, instructions: str, agent_type: str = "tools"):
+        self.name = name
+        self.instructions = (
+            TOOLS_SYSTEM_PROMPT if agent_type == "tools" else EMAILS_SYSTEM_PROMPT
+        )
+        self._llm_client = None
+
+    # ------------------------------------------------------------------ LLM
+    @property
+    def llm_settings(self) -> Dict[str, Optional[str]]:
+        return {
+            "base_url": get_secret("LLM_BASE_URL"),
+            "api_key": get_secret("LLM_API_KEY"),
+            "model": get_secret("LLM_MODEL"),
+        }
+
+    @property
+    def llm_configured(self) -> bool:
+        s = self.llm_settings
+        return bool(s["base_url"] and s["model"])
+
+    def _get_llm_client(self):
+        if self._llm_client is None:
+            if not self.llm_configured:
+                raise LLMUnavailableError(
+                    "No AI model configured (set LLM_BASE_URL and LLM_MODEL)."
+                )
+            from openai import OpenAI  # imported lazily so the app starts without it
+
+            s = self.llm_settings
+            self._llm_client = OpenAI(
+                base_url=s["base_url"],
+                api_key=s["api_key"] or "not-needed",
+                timeout=45.0,
+                max_retries=1,
             )
+        return self._llm_client
 
     async def run(self, messages: list) -> Dict[str, Any]:
         """Default run method to be overridden by child classes"""
         raise NotImplementedError("Subclasses must implement run()")
 
-    @staticmethod
-    def _load_payload(content: str) -> Dict[str, Any]:
-        """Turn the message content back into a dict (JSON first, then a Python
-        literal). Never uses eval(), so user input cannot run code."""
+    def _query_llm(self, prompt: str, system: Optional[str] = None) -> str:
+        """Ask the configured OpenAI-compatible model. Raises LLMUnavailableError."""
+        client = self._get_llm_client()
         try:
-            return json.loads(content)
-        except json.JSONDecodeError:
-            return ast.literal_eval(content)
+            response = client.chat.completions.create(
+                model=self.llm_settings["model"],
+                messages=[
+                    {"role": "system", "content": system or self.instructions},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.2,
+                max_tokens=2000,
+            )
+            return response.choices[0].message.content or ""
+        except LLMUnavailableError:
+            raise
+        except Exception as exc:  # network errors, bad key, bad model name...
+            logger.warning("LLM request failed: %s", redact(exc))
+            raise LLMUnavailableError(f"The AI model could not be reached: {redact(exc)}") from None
 
-    def _query_llm(self, prompt: str) -> str:
-        """Ask the free cloud models, trying each provider in turn."""
-        errors = []
-        for provider, client in self.clients:
-            pname = provider["name"]
-            try:
-                model = _pick_model(provider, client)
-            except Exception as e:
-                errors.append(f"{pname}: {str(e)[:400]}")
-                continue
+    # Backwards-compatible name used by the original code.
+    _query_ollama = _query_llm
 
-            safe_prompt = _trim_prompt(prompt, provider["max_prompt_chars"])
-
-            for attempt in range(2):
-                try:
-                    response = client.chat.completions.create(
-                        model=model,
-                        messages=[
-                            {"role": "system", "content": self.instructions},
-                            {"role": "user", "content": safe_prompt},
-                        ],
-                        temperature=0.3,
-                        max_tokens=provider["max_tokens"],
-                    )
-                    text = response.choices[0].message.content or ""
-                    if text.strip():
-                        return text
-                    errors.append(f"{pname} ({model}): empty response")
-                    break  # try the next provider
-                except RateLimitError as e:
-                    errors.append(f"{pname} ({model}) rate limit: {str(e)[:400]}")
-                    if attempt == 0:
-                        time.sleep(15)  # short wait, then retry once
-                except NotFoundError as e:
-                    _model_cache.pop(pname, None)  # model was retired; re-pick next time
-                    errors.append(f"{pname} ({model}) not found: {str(e)[:400]}")
-                    break
-                except Exception as e:
-                    errors.append(f"{pname} ({model}): {str(e)[:400]}")
-                    break  # not a rate limit, go to the next provider
-
-        raise RuntimeError("All providers failed. " + " | ".join(errors))
-
-    # Old name kept so older code that calls _query_ollama still works.
-    def _query_ollama(self, prompt: str) -> str:
-        return self._query_llm(prompt)
+    @staticmethod
+    def _load_payload(messages: list) -> Dict[str, Any]:
+        """Read the JSON payload from the last message (replaces the old eval())."""
+        content = messages[-1]["content"]
+        if isinstance(content, dict):
+            return content
+        payload = json.loads(content)
+        if not isinstance(payload, dict):
+            raise ValueError("Agent payload must be a JSON object.")
+        return payload
 
     def _parse_json_safely(self, text: str) -> Dict[str, Any]:
         """Safely parse JSON from text, handling potential errors"""
@@ -188,7 +196,10 @@ class BaseAgent:
             start = text.find("{")
             end = text.rfind("}")
             if start != -1 and end != -1:
-                return json.loads(text[start : end + 1])
+                parsed = json.loads(text[start : end + 1])
+                if isinstance(parsed, dict):
+                    return parsed
+                return {"error": "JSON content was not an object"}
             return {"error": "No JSON content found"}
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, TypeError, AttributeError):
             return {"error": "Invalid JSON content"}

@@ -1,49 +1,28 @@
-# AI Travel Agents
+# AI Travel Analysis
 
-A Streamlit app that searches flights and hotels (through SerpAPI), asks a free AI
-model for a short summary, and can email the results with SendGrid.
+Streamlit app: search flights + hotels (SerpAPI), compare them, and **download the results** as PDF, Excel, Word, CSV (flights / hotels) and JSON.
 
-## Keys you need
-
-| Key | Needed for | Where to get it |
-|---|---|---|
-| `GEMINI_API_KEY` | AI summary and airport-code lookup (free tier) | aistudio.google.com/app/apikey |
-| `GROQ_API_KEY` | Optional backup AI model (free tier) | console.groq.com/keys |
-| `SERPAPI_API_KEY` | Flight and hotel search | serpapi.com |
-| `SENDGRID_KEY`, `SENDER_EMAIL` | Optional: sending the email | sendgrid.com (the sender must be verified) |
-
-At least one of the two AI keys is required. Never commit real keys to GitHub.
-
-## Run it on your PC
-
+## Run locally
 ```bash
 python -m venv venv
-venv\Scripts\activate          # Windows (use: source venv/bin/activate on Mac/Linux)
-python -m pip install -r requirements.txt
-copy .env.example .env         # then open .env and add your keys
-python -m streamlit run main.py
+venv\Scripts\activate          # Windows (macOS/Linux: source venv/bin/activate)
+pip install -r requirements.txt
+copy .env.example .env         # then edit .env and add SERPAPI_API_KEY
+streamlit run main.py
 ```
+Run the tests (all provider calls are mocked): `pip install -r requirements-dev.txt` then `python -m pytest -q`
 
-## Deploy on Streamlit Community Cloud
+## Configuration (env vars or Streamlit secrets)
+| Name | Needed for |
+|---|---|
+| `SERPAPI_API_KEY` | **Required** - flights and hotels |
+| `LLM_BASE_URL`, `LLM_MODEL`, `LLM_API_KEY` | Optional - AI recommendations (any OpenAI-compatible API). Without them a rule-based summary is used. Local Ollama: `http://localhost:11434/v1`, `llama3.2`, `ollama` |
+| `SENDGRID_KEY`, `SENDGRID_FROM_EMAIL` | Optional - "Email these results" |
 
-1. Push this folder to a GitHub repository.
-2. Go to share.streamlit.io, click **Create app**, pick the repository and branch,
-   and set **Main file path** to `main.py`.
-3. Open **Advanced settings, Secrets** (or later: **Manage app, Settings, Secrets**)
-   and paste your keys in this format:
+## Deploy on Streamlit Cloud
+1. `git add . && git commit -m "Add downloads, fixes" && git push`
+2. Streamlit Cloud -> your app -> Settings -> Secrets: paste values like `.streamlit/secrets.toml.example`.
+3. Reboot the app. Never commit `.env` or `secrets.toml`.
 
-   ```toml
-   GEMINI_API_KEY = "your-gemini-key"
-   SERPAPI_API_KEY = "your-serpapi-key"
-   ```
-
-4. Click **Deploy**. After changing Secrets, use **Manage app, Reboot app**.
-
-The sidebar of the running app shows which keys are set (never the keys themselves).
-
-## Notes
-
-- Free AI tiers have rate limits, so the app tries Gemini first and Groq second.
-- The email is sent only when you choose "Yes" in the form.
-- Flight search currently uses SerpAPI's `stops = 1` setting (nonstop flights only).
-  Change it in `agents/flight_agent.py` if you want flights with stops.
+## Structure
+`main.py` UI · `agents/` search + email agents · `utils/report_data.py` single report model · `utils/pdf_generator.py`, `excel_generator.py`, `docx_generator.py`, `export_reports.py` (CSV/JSON + one entry point) · `assets/fonts` DejaVu (Unicode PDF text) · `tests/`
