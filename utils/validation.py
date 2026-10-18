@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from datetime import date
+from functools import lru_cache
 from typing import Any, Dict, List, Optional
 
 import airportsdata
@@ -90,3 +91,36 @@ def validate_travel_request(
         elif any(not isinstance(a, int) or a < 0 or a > 17 for a in ages):
             errors.append("Children's ages must be between 0 and 17.")
     return errors
+
+
+# ------------------------------------------------------------ airport dropdown
+def _clean_airport_name(name: str) -> str:
+    """'Dhaka / Hazrat Shahjalal International Airport' -> 'Hazrat Shahjalal International Airport'."""
+    name = (name or "").strip()
+    return name.split(" / ")[-1].strip() if " / " in name else name
+
+
+@lru_cache(maxsize=1)
+def airport_choices() -> tuple:
+    """(labels, label_to_code) for the dropdown. Label pattern: 'DAC-Hazrat Shahjalal International Airport'."""
+    label_to_code = {}
+    for code, info in sorted(_AIRPORTS.items()):
+        name = _clean_airport_name(info.get("name", ""))
+        if name:
+            label_to_code[f"{code}-{name}"] = code
+    return list(label_to_code.keys()), label_to_code
+
+
+def airport_label(code: str) -> Optional[str]:
+    info = airport_info(code)
+    if not info:
+        return None
+    name = _clean_airport_name(info.get("name", ""))
+    return f"{normalise_airport_code(code)}-{name}" if name else None
+
+
+def code_from_label(label: Optional[str]) -> str:
+    """Airport code for a dropdown label ('' when nothing is selected)."""
+    if not label:
+        return ""
+    return airport_choices()[1].get(label, "")

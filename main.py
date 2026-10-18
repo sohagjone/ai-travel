@@ -12,6 +12,10 @@ from dotenv import load_dotenv
 from agents.email_agent import EmailAgent
 from agents.orchestrator_agent import OrchestratorAgent
 from utils.config import get_secret, redact
+from utils.display import (
+    FLIGHT_SORTS, HOTEL_SORTS, day_offset, fmt_date, fmt_time, flight_highlights,
+    hotel_highlights, md_link, stops_text,
+)
 from utils.export_reports import build_all_exports
 from utils.report_data import (
     FLIGHT_COLUMNS,
@@ -21,10 +25,10 @@ from utils.report_data import (
     fmt_money,
 )
 from utils.validation import (
-    airport_info,
+    airport_choices,
     city_for_airport,
+    code_from_label,
     is_valid_email,
-    normalise_airport_code,
     validate_travel_request,
 )
 
@@ -77,8 +81,15 @@ def render_form() -> Optional[Dict[str, Any]]:
     today = date.today()
     st.subheader("Plan your trip")
     c1, c2 = st.columns(2)
-    origin = c1.text_input("Origin airport code", key="origin", placeholder="e.g. MAD", max_chars=3, help="3-letter IATA code")
-    destination = c2.text_input("Destination airport code", key="destination", placeholder="e.g. AMS", max_chars=3, help="3-letter IATA code")
+    labels, _ = airport_choices()
+    origin_label = c1.selectbox(
+        "Origin airport", options=labels, index=None, key="origin",
+        placeholder="Type a code or airport name, e.g. DAC", help="Start typing to search all airports.",
+    )
+    destination_label = c2.selectbox(
+        "Destination airport", options=labels, index=None, key="destination",
+        placeholder="Type a code or airport name, e.g. AMS", help="Start typing to search all airports.",
+    )
     d1, d2 = st.columns(2)
     departure_date = d1.date_input("Departure date", value=today + timedelta(days=30), min_value=today, key="dep_date")
     return_date = d2.date_input("Return date", value=today + timedelta(days=37), min_value=today, key="ret_date")
@@ -109,8 +120,8 @@ def render_form() -> Optional[Dict[str, Any]]:
     submitted = st.button("Search flights and hotels", type="primary")
     return {
         "submit": submitted,
-        "origin": normalise_airport_code(origin),
-        "destination": normalise_airport_code(destination),
+        "origin": code_from_label(origin_label),
+        "destination": code_from_label(destination_label),
         "departure_date": departure_date,
         "return_date": return_date,
         "adults": adults,
@@ -212,35 +223,88 @@ def render_exports(search: Dict[str, Any]) -> None:
                 st.error(export.error or f"{export.label} could not be created.")
 
 
+def _badges(*pairs) -> str:
+    return " ".join(f":{color}-badge[{text}]" for color, text in pairs if text)
+
+
+def _sorted(rows, sorts, label, key):
+    choice = st.selectbox(label, options=list(sorts.keys()), key=key)
+    return sorted(rows, key=sorts[choice])
+
+
+def _show_limit(total: int, key: str, step: int = 10) -> int:
+    if total <= step:
+        return total
+    return total if st.toggle(f"Show all {total} options (showing {step})", key=key) else step
+
+
 def render_flights(report: Dict[str, Any]) -> None:
     flights = report["flights"]
     if not flights:
         st.info("No flight options were returned for this search. Try different dates, or allow more stops under *More options*.")
         return
     currency = report["request"]["currency"]
-    df = pd.DataFrame(
-        {
-            "Airline": [f["airline"] for f in flights],
-            "Logo": [f["logo_url"] for f in flights],
-            "Flight": [f["flight_number"] for f in flights],
-            "Departure": [f["departure"] for f in flights],
-            "Arrival": [f["arrival"] for f in flights],
-            "Duration": [f["duration"] for f in flights],
-            "Stops": [f["stops"] for f in flights],
-            f"Price ({currency})": [f["price"] for f in flights],
-            "Link": [f["booking_url"] for f in flights],
-        }
-    )
-    fmt = f"{currency_symbol(currency)}%,.0f" if currency_symbol(currency) else "%,.0f"
-    st.dataframe(
-        df, hide_index=True, use_container_width=True,
-        column_config={
-            "Logo": st.column_config.ImageColumn("Logo", width="small"),
-            f"Price ({currency})": st.column_config.NumberColumn(f"Price ({currency})", format=fmt),
-            "Link": st.column_config.LinkColumn("Booking", display_text="Google Flights"),
-        },
-    )
+    hi = flight_highlights(flights)
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Flights found", len(flights))
+    cheapest, fastest = hi["cheapest"], hi["fastest"]
+    m2.metric("Cheapest", fmt_money(cheapest["price"], currency) if cheapest else "n/a", cheapest["airline"] if cheapest else None, delta_color="off")
+    m3.metric("Fastest", fastest["duration"] if fastest else "n/a", fastest["airline"] if fastest else None, delta_color="off")
+
+    rows = _sorted(flights, FLIGHT_SORTS, "Sort flights by", "sort_flights")
+    for f in rows[: _show_limit(len(rows), "show_all_flights")]:
+        with st.container(border=True):
+            c_logo, c_main, c_route, c_price = st.columns([1, 3, 5, 3], vertical_alignment="center")
+            with c_logo:
+                if f.get("logo_url"):
+                    st.image(f["logo_url"], width=48)
+            with c_main:
+                st.markdown(f"**{_md_safe(f.get('airline') or 'Airline n/a')}**")
+                st.caption(_md_safe(f.get("flight_number") or "Flight number n/a"))
+                st.markdown(_badges(
+                    ("green", "Cheapest" if f is cheapest else ""),
+                    ("blue", "Fastest" if f is fastest else ""),
+                    ("orange", "Google top pick" if f.get("top_pick") else ""),
+                ))
+            with c_route:
+                offset = day_offset(f.get("departure"), f.get("arrival"))
+                st.markdown(
+                    f"### {fmt_time(f.get('departure'))} → {fmt_time(f.get('arrival'))}"
+                    + (f" <sup>{offset}</sup>" if offset else ""),
+                    unsafe_allow_html=True,
+                )
+                st.caption(
+                    f"{_md_safe(f.get('departure_airport') or '')} → {_md_safe(f.get('arrival_airport') or '')}"
+                    f" · {_md_safe(f.get('duration') or 'duration n/a')} · {stops_text(f.get('stops'))}"
+                    + (f" · {fmt_date(f.get('departure'))}" if fmt_date(f.get("departure")) else "")
+                )
+            with c_price:
+                st.markdown(f"### {_md_safe(fmt_money(f.get('price'), currency))}")
+                if f.get("booking_url"):
+                    st.markdown(md_link(f["booking_url"], "View on Google Flights ↗"))
     st.caption("Prices are search results, not confirmed fares. The link opens a Google Flights search for this whole query.")
+
+    with st.expander("Table view (sortable, for comparing)"):
+        df = pd.DataFrame(
+            {
+                "Airline": [f["airline"] for f in flights],
+                "Flight": [f["flight_number"] for f in flights],
+                "Departure": [f["departure"] for f in flights],
+                "Arrival": [f["arrival"] for f in flights],
+                "Duration": [f["duration"] for f in flights],
+                "Stops": [f["stops"] for f in flights],
+                f"Price ({currency})": [f["price"] for f in flights],
+                "Link": [f["booking_url"] for f in flights],
+            }
+        )
+        fmt = f"{currency_symbol(currency)}%,.0f" if currency_symbol(currency) else "%,.0f"
+        st.dataframe(
+            df, hide_index=True, use_container_width=True,
+            column_config={
+                f"Price ({currency})": st.column_config.NumberColumn(f"Price ({currency})", format=fmt),
+                "Link": st.column_config.LinkColumn("Booking", display_text="Google Flights"),
+            },
+        )
 
 
 def render_hotels(report: Dict[str, Any]) -> None:
@@ -249,30 +313,72 @@ def render_hotels(report: Dict[str, Any]) -> None:
         st.info("No hotel options were returned for this search.")
         return
     currency = report["request"]["currency"]
-    fmt = f"{currency_symbol(currency)}%,.0f" if currency_symbol(currency) else "%,.0f"
-    df = pd.DataFrame(
-        {
-            "Photo": [h["image_url"] for h in hotels],
-            "Hotel": [h["name"] for h in hotels],
-            "Rating": [h["rating"] for h in hotels],
-            "Reviews": [h["reviews"] for h in hotels],
-            f"Per night ({currency})": [h["price_per_night"] for h in hotels],
-            f"Total ({currency})": [h["total_price"] for h in hotels],
-            "Amenities": [h["amenities"] or None for h in hotels],
-            "Link": [h["booking_url"] for h in hotels],
-        }
-    )
-    st.dataframe(
-        df, hide_index=True, use_container_width=True,
-        column_config={
-            "Photo": st.column_config.ImageColumn("Photo", width="small"),
-            "Rating": st.column_config.NumberColumn("Rating", format="%.1f"),
-            f"Per night ({currency})": st.column_config.NumberColumn(f"Per night ({currency})", format=fmt),
-            f"Total ({currency})": st.column_config.NumberColumn(f"Total ({currency})", format=fmt),
-            "Link": st.column_config.LinkColumn("Website", display_text="Open"),
-        },
-    )
+    hi = hotel_highlights(hotels)
+    top, low = hi["top_rated"], hi["lowest_price"]
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Hotels found", len(hotels))
+    m2.metric("Top rated", f"{top['rating']:.1f} ★" if top else "n/a", top["name"] if top else None, delta_color="off")
+    m3.metric("Lowest per night", fmt_money(low["price_per_night"], currency) if low else "n/a", low["name"] if low else None, delta_color="off")
+
+    rows = _sorted(hotels, HOTEL_SORTS, "Sort hotels by", "sort_hotels")
+    for h in rows[: _show_limit(len(rows), "show_all_hotels")]:
+        with st.container(border=True):
+            c_img, c_info, c_price = st.columns([2, 6, 3], vertical_alignment="center")
+            with c_img:
+                if h.get("image_url"):
+                    st.image(h["image_url"], width=140)
+                else:
+                    st.caption("No photo")
+            with c_info:
+                st.markdown(f"**{_md_safe(h.get('name'))}**")
+                bits = []
+                if h.get("hotel_class"):
+                    bits.append(_md_safe(h["hotel_class"]))
+                if h.get("rating") is not None:
+                    reviews = f" ({h['reviews']:,} reviews)" if isinstance(h.get("reviews"), int) else ""
+                    bits.append(f"{h['rating']:.1f} ★{reviews}")
+                if bits:
+                    st.caption(" · ".join(bits))
+                st.markdown(_badges(
+                    ("green", "Top rated" if h is top else ""),
+                    ("blue", "Lowest price" if h is low else ""),
+                ))
+                amenities = h.get("amenities_list") or []
+                if amenities:
+                    shown = ", ".join(_md_safe(a) for a in amenities[:5])
+                    more = f" +{len(amenities) - 5} more" if len(amenities) > 5 else ""
+                    st.caption(shown + more)
+            with c_price:
+                st.markdown(f"### {_md_safe(fmt_money(h.get('price_per_night'), currency))}")
+                st.caption("per night" if h.get("price_per_night") is not None else "price not available")
+                if h.get("total_price") is not None:
+                    st.caption(f"Total stay: {_md_safe(fmt_money(h['total_price'], currency))}")
+                if h.get("booking_url"):
+                    st.markdown(md_link(h["booking_url"], "Visit website ↗"))
     st.caption("Prices are search results, not bookings. Hotel links go to the website/listing returned by the provider.")
+
+    with st.expander("Table view (sortable, for comparing)"):
+        fmt = f"{currency_symbol(currency)}%,.0f" if currency_symbol(currency) else "%,.0f"
+        df = pd.DataFrame(
+            {
+                "Hotel": [h["name"] for h in hotels],
+                "Rating": [h["rating"] for h in hotels],
+                "Reviews": [h["reviews"] for h in hotels],
+                f"Per night ({currency})": [h["price_per_night"] for h in hotels],
+                f"Total ({currency})": [h["total_price"] for h in hotels],
+                "Amenities": [h["amenities"] or None for h in hotels],
+                "Link": [h["booking_url"] for h in hotels],
+            }
+        )
+        st.dataframe(
+            df, hide_index=True, use_container_width=True,
+            column_config={
+                "Rating": st.column_config.NumberColumn("Rating", format="%.1f"),
+                f"Per night ({currency})": st.column_config.NumberColumn(f"Per night ({currency})", format=fmt),
+                f"Total ({currency})": st.column_config.NumberColumn(f"Total ({currency})", format=fmt),
+                "Link": st.column_config.LinkColumn("Website", display_text="Open"),
+            },
+        )
 
 
 def render_recommendations(report: Dict[str, Any]) -> None:

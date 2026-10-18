@@ -108,6 +108,7 @@ class FlightAgent(BaseAgent):
                         "departure_airport": (first.get("departure_airport") or {}).get("id"),
                         "arrival_airport": (last.get("arrival_airport") or {}).get("id"),
                         "duration": _format_duration(total_minutes),
+                        "duration_minutes": int(total_minutes) if total_minutes else None,
                         "stops": len(legs) - 1,
                         "price": f"{price:,.0f}" if price is not None else None,
                         "price_value": price,

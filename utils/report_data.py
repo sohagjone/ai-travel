@@ -130,6 +130,7 @@ def _flight_rows(flights_result: Optional[Dict[str, Any]], currency: str) -> Lis
                 "arrival_airport": f.get("arrival_airport"),
                 "arrival": f.get("arrival"),
                 "duration": f.get("duration"),
+                "duration_minutes": f.get("duration_minutes"),
                 "stops": f.get("stops"),
                 "price": f.get("price_value"),
                 "currency": f.get("currency") or currency,
